@@ -430,5 +430,3 @@ cd build
 - [LLM.png](Transformer/LLM.png) - 블록 다이어그램
 - [LLM Inference Pipeline Architecture Flow.png](LLM%20Inference%20Pipeline%20Architecture%20Flow.png) - 전체 파이프라인
 
----
-# studyLLM
