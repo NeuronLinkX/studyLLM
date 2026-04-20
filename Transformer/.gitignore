@@ -1,0 +1,20 @@
+.vscode/
+
+# Build outputs
+build/*
+llm-c/build/*
+
+# Native binaries and libraries
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Generated weight binaries
+*.bin
+
+# Java artifacts
+*.jar
+docs/figures/*.jar

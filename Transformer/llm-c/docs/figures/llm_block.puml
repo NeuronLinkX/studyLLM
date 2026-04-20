@@ -1,0 +1,192 @@
+@startuml
+' ---------- Global look & feel (CSS 대체) ----------
+skinparam shadowing false
+skinparam dpi 120
+skinparam defaultTextAlignment left
+skinparam ArrowColor #666
+skinparam ArrowThickness 1.2
+skinparam Rectangle {
+  BorderColor #777
+  BackgroundColor #f9fafb
+  RoundCorner 12
+}
+skinparam Package {
+  BackgroundColor #ffffff
+  BorderColor #999
+  FontColor #222
+  BorderThickness 1
+  RoundCorner 14
+}
+skinparam NoteBackgroundColor #fff8e1
+skinparam NoteBorderColor #d6b85f
+
+' stereotype별 색상 (CSS처럼 테마 분리)
+skinparam rectangle<<section>>   BackgroundColor #ffffff
+skinparam rectangle<<op>>        BackgroundColor #f3f6ff
+skinparam rectangle<<attn>>      BackgroundColor #eef7ff
+skinparam rectangle<<cache>>     BackgroundColor #fff6ec
+skinparam rectangle<<head>>      BackgroundColor #f0fff4
+skinparam rectangle<<token>>     BackgroundColor #fff0f6
+hide stereotype
+
+top to bottom direction
+title **C/C++ Hybrid LLM — All-in-One (E2E + Block Zoom + FIM + Token Flow)**
+
+' =================== End-to-End Path ===================
+package "End-to-End Inference Path" as E2E {
+  package "Embedding & Inputs" as P_IN {
+    rectangle "Token IDs (T)"           as TOK  <<op>>
+    rectangle "Token Embedding (V×d_model)" as EMB  <<op>>
+    rectangle "Positional Encoding\n• Sin/Cos (scaled)\n• RoPE (Q,K)\n• (opt) ALiBi" as PE <<op>>
+    TOK --> EMB : lookup
+    EMB --> PE  : add/apply
+  }
+
+  package "Decoder Stack (N×, Pre-LN)" as P_DEC {
+    rectangle "Block #1\n(Self-Attn + FFN)" as B1  <<op>>
+    rectangle "Block #2\n(Self-Attn + FFN)" as B2  <<op>>
+    rectangle "⋮\n(repeated blocks)"        as BM  <<op>>
+    rectangle "Block #N\n(Self-Attn + FFN)" as BN  <<op>>
+    PE --> B1
+    B1 --> B2
+    B2 --> BM
+    BM --> BN
+  }
+
+  package "Head" as P_HEAD {
+    rectangle "Final LayerNorm (opt)" as LNf <<head>>
+    rectangle "LM Head (d_model×V)"   as LMH <<head>>
+    rectangle "Logits (T×V)"          as LOG <<head>>
+    BN --> LNf
+    LNf --> LMH
+    LMH --> LOG
+  }
+
+  note right of PE
+  - FIM 지원: <FIM_PREFIX>, <FIM_MIDDLE>, <FIM_SUFFIX>
+  - Packed prompts (opt)
+  end note
+}
+
+' =================== Block Zoom ===================
+package "Decoder Block (Zoom-in, Pre-LN)" as ZOOM {
+  rectangle "Input X (T×d_model)"   as ZX     <<section>>
+  rectangle "LayerNorm γ,β"         as ZLN1   <<op>>
+  rectangle "Proj_Q (d_model→nH·d_h)" as ZWQ  <<op>>
+  rectangle "Proj_K (d_model→nH·d_h)" as ZWK  <<op>>
+  rectangle "Proj_V (d_model→nH·d_h)" as ZWV  <<op>>
+  rectangle "Apply RoPE to Q,K"     as ZROPE  <<op>>
+
+  package "Attention Core (per head)" as ZATTN {
+    rectangle "Q × K^T / √d_h"      as ZSDOT  <<attn>>
+    rectangle "Causal Mask\n(+ FIM prefix/suffix mask)" as ZMASK <<attn>>
+    rectangle "Softmax"             as ZSM    <<attn>>
+    rectangle "Σ(softmax·V)"        as ZWTV   <<attn>>
+  }
+
+  rectangle "Concat Heads"            as ZCAT  <<op>>
+  rectangle "Proj_O (nH·d_h→d_model)" as ZWO   <<op>>
+  rectangle "Add Residual"            as ZRES1 <<op>>
+  rectangle "LayerNorm γ,β"           as ZLN2  <<op>>
+  rectangle "FFN (W1, act, W2)\n- GELU or SwiGLU" as ZFFN <<op>>
+  rectangle "Add Residual"            as ZRES2 <<op>>
+  rectangle "Output Y (T×d_model)"    as ZY    <<section>>
+
+  ' 흐름
+  ZX --> ZLN1
+  ZLN1 --> ZWQ
+  ZLN1 --> ZWK
+  ZLN1 --> ZWV
+  ZWQ --> ZROPE
+  ZWK --> ZROPE
+  ZROPE --> ZSDOT
+  ZWV --> ZWTV
+  ZSDOT --> ZMASK
+  ZMASK --> ZSM
+  ZSM --> ZWTV
+  ZWTV --> ZCAT
+  ZCAT --> ZWO
+  ZWO --> ZRES1
+  ZX  --> ZRES1
+  ZRES1 --> ZLN2
+  ZLN2  --> ZFFN
+  ZFFN  --> ZRES2
+  ZRES2 --> ZY
+
+  package "KV Cache & MLA Hook" as ZCACHE {
+    rectangle "K-Cache[t≤T]" as ZKC <<cache>>
+    rectangle "V-Cache[t≤T]" as ZVC <<cache>>
+    rectangle "MLA Compress/Decompress\n(kv_compression_factor≤1.0)" as ZMLA <<cache>>
+  }
+  ZWK --> ZMLA
+  ZMLA --> ZKC
+  ZWV --> ZMLA
+  ZMLA --> ZVC
+  ZKC --> ZSDOT
+  ZVC --> ZWTV
+
+  note right of ZMASK
+  - Causal mask (i ≤ t)
+  - FIM: 가운데 구간 예외
+  - Packed batch mask (opt)
+  end note
+
+  note right of ZFFN
+  W1: d_model → d_ff
+  act: GELU/SwiGLU
+  W2: d_ff → d_model
+  end note
+}
+
+' 배치: ZOOM을 E2E 아래쪽에 배치하려는 의도 (레이아웃 힌트)
+E2E -[hidden]-> ZOOM
+
+' =================== FIM Builder ===================
+package "FIM Context Builder" as FIM {
+  rectangle "<FIM_PREFIX> P"                  as FP <<op>>
+  rectangle "<FIM_SUFFIX> S"                  as FS <<op>>
+  rectangle "<FIM_MIDDLE> M (to predict)"     as FM <<op>>
+  rectangle "Concat [S | ⟨GAP⟩ | P]"          as FC <<op>>
+  FP --> FC
+  FS --> FC
+  FC --> B1 : feed to decoder
+}
+E2E -[hidden]-> FIM
+
+' =================== Token Flow Example ===================
+package "Token Flow Example — \"Hello, world!\"" as TOKFLOW {
+  rectangle "Tokenizer/Vocab (예)\nid=1:\"Hello,\"  id=2:\"world\"  id=3:\"!\"  id=5:<eos>" as TVOC <<token>>
+
+  package "t=0" as T0 {
+    rectangle "logits[6]\n-0.844  4.412  1.245  4.672  1.696  0.218" as L0 <<token>>
+    rectangle "decode(greedy/top-k)\n→ ex) id=3 \"!\" 혹은 id=1 \"Hello,\"" as S0 <<token>>
+  }
+  package "t=1" as T1 {
+    rectangle "logits[6]\n 2.749 -0.393  4.973  1.206  0.766  2.479" as L1 <<token>>
+    rectangle "argmax → id=2 \"world\"" as S1 <<token>>
+  }
+  package "t=2" as T2 {
+    rectangle "logits[6]\n 2.024  0.000  4.344  1.075  0.112  2.565" as L2 <<token>>
+    rectangle "argmax → id=2 \"world\"\n(or <eos>/\"!\" per rule)" as S2 <<token>>
+  }
+
+  rectangle "Detokenize(ids)\n→ \"Hello, world!\"" as DETOK <<token>>
+
+  TVOC -[hidden]-> L0
+  L0 --> S0
+  S0 --> L1
+  L1 --> S1
+  S1 --> L2
+  L2 --> S2
+  S0 --> DETOK
+  S1 --> DETOK
+  S2 --> DETOK
+
+  legend right
+  [주의]
+  1) 실제 문자열 재현은 tokenizer 매핑/디코딩 규칙/LM Head 가중치가 일치해야 함
+  2) demo(로짓 출력)와 hello_min(고정 문자열)은 경로가 다를 수 있음
+  endlegend
+}
+E2E -[hidden]-> TOKFLOW
+@enduml
